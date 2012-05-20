@@ -1,0 +1,4 @@
+*.py[cod]
+backups/
+env/
+.DS_Store
