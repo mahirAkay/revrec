@@ -46,7 +46,7 @@ def gen_invoice():
 
     # Create payment
     payment_id = None
-    if roll_dice(1.0):
+    if roll_dice(1):
         payment_results = gen_payment(account_id=account_id, 
                                       invoice_id=invoice_id,  
                                       invoice_date=invoice_date, 
@@ -55,7 +55,7 @@ def gen_invoice():
         payment_date = payment_results[1]
 
     # Create refund
-    if roll_dice(1) and payment_id is not None:
+    if roll_dice(0) and payment_id is not None:
         refund = gen_refund(account_id=account_id, 
                             invoice_id=invoice_id, 
                             invoice_date=invoice_date, 
@@ -109,8 +109,9 @@ def gen_invoice_item(account_id, invoice_id, invoice_date):
     return {'total_amount': amount}
 
 def gen_payment(account_id, invoice_id, invoice_date, amount):
-
-    if roll_dice(0.5):
+    """Generate a fake payment
+    """
+    if roll_dice(0):
         paid_days_late = 0
     else:
         paid_days_late = random.choice(range(1,16))
@@ -128,7 +129,8 @@ def gen_payment(account_id, invoice_id, invoice_date, amount):
     return [payment_id, payment_date]
 
 def gen_refund(account_id, invoice_id, invoice_date, amount, payment_id, payment_date):
-
+    """Generate a fake refund
+    """
     refund = Refund(
         refund_id=gen_id(),
         account_id=account_id,
@@ -141,7 +143,8 @@ def gen_refund(account_id, invoice_id, invoice_date, amount, payment_id, payment
     refund.save()
 
 def gen_term_extension(account_id, invoice_id, invoice_date, service_start, service_end):
-
+    """Generate a fake term extension
+    """
     ext = TermExtension(
         term_extension_id=gen_id(),
         account_id=account_id,

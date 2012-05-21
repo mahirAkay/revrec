@@ -2,6 +2,27 @@ from __future__ import division
 from datetime import datetime, timedelta, date
 from helpers import daterange, pretty_date, days_elapsed, day_before, last_day_of_month
 
+def create_schedule(values={}):
+    """Returns a daily schedule of debits and credits.
+    
+    :param values: Dictionary of values to set within the template.
+    :return dict. Daily schedule of debits and credits.
+    """
+    template = {
+        'cr_rev': 0,
+        'dr_defrev': 0,
+        'ending_defrev': 0,
+        'cumul_rev': 0,
+        'cr_ref_payable': 0,
+        'dr_reserve_ref': 0,
+        'dr_contra_rev': 0,
+        'dr_reserve_graceperiod': 0,
+        'cr_contra_rev': 0
+    }
+    for k, v in values.iteritems():
+        template[k] = v
+    return template
+
 def amortize_amount(revrec_schedule, amt, start_date, end_date):
     """
     Modifies an existing revrec_schedule by amortizing the amount over the 
@@ -42,88 +63,99 @@ def amortize_service_fee(item, payment_date):
     # Fee amount
     amount = item.total_amount
 
-    # Daily amortization of deferred revenue to revenue
-    daily_amort = amount / days_elapsed(revrec_start, revrec_end)
-
     # Deferred revenue does not exist until payment is made
     defrev = 0
-    rev = 0
+    daily_amort = 0
     cumul_rev = 0
 
-    # Generating revenue recognition schedule
-    for date in daterange(item.service_start, revrec_end):
+    # Generating revenue recognition schedule. Iterate over service period by day.
+    for date in daterange(item.service_start, item.service_end):
 
-        # On payment date, set the deferred revenue balance
-        # and daily revenue amortization
+        # On payment date, set the deferred revenue balance and daily revenue amortization
         if date == payment_date:
             defrev = amount
-            rev = daily_amort
+            daily_amort = amount / days_elapsed(revrec_start, revrec_end)
+        
         # From payment date and onwards, amortize deferred revenue to revenue
         if date >= payment_date: 
             defrev = defrev - daily_amort
-            cumul_rev += rev
+            cumul_rev += daily_amort
 
-        revrec_schedule[date] = {
-            'cr_rev': rev,
-            'dr_defrev': rev,
+        values = {
+        	'cr_rev': daily_amort,
+            'dr_defrev': daily_amort,
             'ending_defrev': defrev,
             'cumul_rev': cumul_rev,
-            'cr_ref_payable': 0,
-            'dr_reserve_ref': 0,
-            'dr_contra_rev': 0,
-            'dr_reserve_graceperiod': 0,
-            'cr_contra_rev': 0
         }
+        revrec_schedule[date] = create_schedule(values)
 
     return revrec_schedule
 
 def apply_grace_period(revrec_schedule, item, payment_date):
-    """Adjusts the specified revrec schedule for late payment, which
-    requires journal entries related to grace period.
+    """Adjusts the specified revrec schedule for late payment, which requires journal entries 
+    related to grace period.
 
-    :param revrec_schedule: Dictionary of debits and credits by day
+    :param revrec_schedule: Dictionary of debits and credits by day to be adjusted due to 
+                            application of grace period.
     :param item: InvoiceItem object
     :param payment_date: Date of payment
+    :return list. Supporting notes on grace period calculations. Displayed in UI output. 
     """
     gp_notes = []
 
     service_start = item.service_start
     service_end = item.service_end
 
-    billperiod = item.billperiod
+    # Identify the details of the prev paid service period.
     shift = {'Monthly': 30, 'Yearly': 365, 'Biyearly': 730}
+    prev_service_end = day_before(service_start)
+    prev_service_start = prev_service_end - timedelta(shift[item.billperiod] - 1) 
+    prev_service_term = days_elapsed(prev_service_start, prev_service_end)
+    prev_amount = item.total_amount
+    prev_amort = prev_amount / prev_service_term
 
-    previous_service_end = service_start - timedelta(1) 
-    previous_service_start = previous_service_end - timedelta(shift[billperiod] - 1) 
-    previous_service_term = (previous_service_end - previous_service_start).days + 1
-    previous_amort = item.total_amount / previous_service_term
-
+    # Financial reporting days. Important for determining debit and credit entries.
     current_reporting_day = datetime(service_start.year, service_start.month, 
                                      last_day_of_month(service_start.year, service_start.month))
-    previous_reporting_day = datetime(previous_service_end.year, previous_service_end.month, 1) - timedelta(1)
+    prev_reporting_day = day_before(datetime(prev_service_end.year, prev_service_end.month, 1))
 
+    # Notes for display in the UI output.
     gp_notes.append('JOURNAL ENTRIES FOR GRACE PERIOD')
     gp_notes.append('---'*60)
-    gp_notes.append('payment date: %s, current term: %s -> %s, previous term: %s -> %s' % (
+    gp_notes.append('payment date: %s, current term: %s -> %s, prev term: %s -> %s' % (
         pretty_date(payment_date),
         pretty_date(service_start),
         pretty_date(service_end),
-        pretty_date(previous_service_start),
-        pretty_date(previous_service_end)))
+        pretty_date(prev_service_start),
+        pretty_date(prev_service_end)))
 
-    gp_notes.append('current reporting day: %s, previous reporting day: %s, days reserved for: %s -> %s' % (
+    gp_notes.append('current reporting day: %s, prev reporting day: %s, days reserved for: %s -> %s' % (
         pretty_date(current_reporting_day), 
-        pretty_date(previous_reporting_day),
-        previous_service_start,
-        previous_reporting_day))
+        pretty_date(prev_reporting_day),
+        prev_service_start,
+        prev_reporting_day))
 
-    running_total = 0
-    for date in daterange(service_start, payment_date - timedelta(1)):
-        revised_service_term = previous_service_term + (date - service_start).days + 1
-        revised_amort = item.total_amount / revised_service_term
-        amort_difference = previous_amort - revised_amort
-        revised_dr_reserve_graceperiod = ((previous_reporting_day - previous_service_start).days + 1) * amort_difference
-        dr_reserve_graceperiod = revised_dr_reserve_graceperiod - running_total
+    # For each date that payment is late...
+    running_total_dr_reserve = 0
+    for date in daterange(service_start, day_before(payment_date)):
+
+        # The previous service term is extended by the grace period used
+        revised_service_term = prev_service_term + days_elapsed(service_start, date)
+
+        # Revenue amortization for the extended service term
+        revised_amort = prev_amount / revised_service_term
+
+        # Difference in the daily amortization for the previous service term
+        amort_difference = prev_amort - revised_amort
+
+        # The difference b/n revenue that should have been recognized vs. what was recognized in the period
+        # prior to the previous reporting day. This amount has already been reserved for, so the journal
+        # entry is a debit against the reserve for grace periods.
+        revised_dr_reserve_graceperiod = days_elapsed(prev_service_start, prev_reporting_day) * amort_difference
+
+        # We have been debiting the reserve for each day late, this day's debit amount is equal to the
+        # incremental debit against the reserve. The other side of the entry is credit contra-revenue.
+        dr_reserve_graceperiod = revised_dr_reserve_graceperiod - running_total_dr_reserve
         cr_contra_rev = dr_reserve_graceperiod
 
         revrec_schedule[date]['dr_reserve_graceperiod'] = dr_reserve_graceperiod
@@ -132,16 +164,18 @@ def apply_grace_period(revrec_schedule, item, payment_date):
         gp_notes.append('%s, PrevTerm: %s->%s, PrevAmort: $%s->$%s, Value: %s, DaysReservedFor: %s, \
                         PrevTotalReserve %s, TotalReserve: %s, DR reserve: %s' % (
             pretty_date(date),
-            previous_service_term,
+            prev_service_term,
             revised_service_term,
-            round(previous_amort, 3),
+            round(prev_amort, 3),
             round(revised_amort, 3),
             revised_service_term * revised_amort,
-            (previous_reporting_day - previous_service_start).days + 1,
-            round(running_total, 3),
+            (prev_reporting_day - prev_service_start).days + 1,
+            round(running_total_dr_reserve, 3),
             round(revised_dr_reserve_graceperiod, 3),
             round(dr_reserve_graceperiod,3)))
-        running_total += dr_reserve_graceperiod
+
+        running_total_dr_reserve += dr_reserve_graceperiod
+    
     gp_notes.append('---'*60)
     return gp_notes
 
@@ -291,20 +325,19 @@ def apply_term_extensions(item, revrec_schedule, term_extensions):
 
     """
     for ext in term_extensions:
-        defrev = revrec_schedule[ext.grant_date - timedelta(1)]['ending_defrev']
+        defrev = revrec_schedule[day_before(ext.grant_date)]['ending_defrev']
 
         start = ext.grant_date
         end = ext.service_end
-        daily_amort = defrev / ((end - start).days + 1)
+        daily_amort = defrev / days_elapsed(start, end)
 
         for date in daterange(start, end):
             defrev = defrev - daily_amort
-            template =  {
-                'cr_rev': daily_amort,
-                'ending_defrev': defrev,
-                'cr_ref_payable': 0,
-                'dr_reserve_ref': 0
-            }
+            template = dict(revrec_daily_template)
+            template['cr_rev'] = daily_amort
+            template['dr_defrev'] = daily_amort
+            template['ending_defrev'] = defrev
+
             try:
                 revrec_schedule[date]['cr_rev'] = daily_amort
                 revrec_schedule[date]['ending_defrev'] = defrev
